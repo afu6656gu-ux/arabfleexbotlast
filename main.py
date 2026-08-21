@@ -31,7 +31,7 @@ except ImportError:
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- رقم الإصدار ---
-VERSION = "14.6.0 (Added Cloudflare R2)"
+VERSION = "14.6.1 (Fixed Cloudflare R2 Public Link)"
 
 TOKEN = "8888154300:AAF8Ec1xJ27xKyjXDvxOG6kRFC0rQt8aKXY"
 ADMIN_CHAT_ID = 1013251619
@@ -50,7 +50,8 @@ DEFAULT_KEYS = {
     "CF_R2_ACCESS_KEY": "c889ca01c50cc327d73a3726e01225a8",
     "CF_R2_SECRET_KEY": "a291f299669e419b8b5d85fa8cff421732fc3af32030b731260d844f6d5bc2a2",
     "CF_R2_ACCOUNT_ID": "a28ef4137231ef7aa6756d28c5450bcd",
-    "CF_R2_BUCKET_NAME": "media-stream"
+    "CF_R2_BUCKET_NAME": "media-stream",
+    "CF_R2_PUBLIC_URL": "https://pub-eb6d088b2e4848c1b93664d6cb1123d1.r2.dev" # تم إضافة الرابط العام هنا
 }
 
 def load_config():
@@ -198,7 +199,6 @@ def safe_edit(bot_instance, chat_id, message_id, text, reply_markup=None):
 def start(message):
     if message.chat.id != ADMIN_CHAT_ID:
         return
-    # رسالة ترحيبية أقصر حسب الطلب
     welcome_text = f"""🤖 *مرحباً بك في بوت Arab Fleex الاحترافي!*
 
 ⚡ البوت جاهز لسحب ورفع الفيديوهات (مفرد/باتش/دمج).
@@ -227,7 +227,7 @@ def manage_keys_cmd(message):
         InlineKeyboardButton("🔑 GoFile", callback_data="changekey_GOFILE_TOKEN"),
         InlineKeyboardButton("🔑 VK Token", callback_data="changekey_VK_ACCESS_TOKEN"),
         InlineKeyboardButton("🔑 Doodstream", callback_data="changekey_DOODSTREAM_API_KEY"),
-        InlineKeyboardButton("☁️ Cloudflare R2", callback_data="changekey_CF_R2_ACCESS_KEY") # اختصار لإدارة المفتاح
+        InlineKeyboardButton("☁️ Cloudflare R2", callback_data="changekey_CF_R2_ACCESS_KEY") 
     ]
     markup.add(*buttons)
     bot.reply_to(message, "⚙️ *لوحة إدارة مفاتيح الـ API*\n\nاختر السيرفر الذي تريد تغيير مفتاحه. التغيير يطبق فوراً ويُحفظ دائماً:\n(بالنسبة لـ Cloudflare R2 ينصح بتعديل باقي البيانات يدوياً من السكربت لتعددها)", reply_markup=markup, parse_mode="Markdown")
@@ -319,7 +319,6 @@ def check_servers(message):
     except Exception:
          txt += f"📘 *VK:* 🔴 فشل الاتصال\n"
          
-    # Check Cloudflare R2 Support
     if HAS_BOTO3:
         try:
             s3 = boto3.client('s3', endpoint_url=f"https://{bot_config['CF_R2_ACCOUNT_ID']}.r2.cloudflarestorage.com", aws_access_key_id=bot_config['CF_R2_ACCESS_KEY'], aws_secret_access_key=bot_config['CF_R2_SECRET_KEY'], region_name='auto')
@@ -551,6 +550,8 @@ def upload_to_r2(file_path, safe_filename, task_id, progress_dict, result_dict):
         access_key = bot_config.get("CF_R2_ACCESS_KEY", "")
         secret_key = bot_config.get("CF_R2_SECRET_KEY", "")
         bucket_name = bot_config.get("CF_R2_BUCKET_NAME", "")
+        # جلب الرابط العام من الإعدادات
+        public_url = bot_config.get("CF_R2_PUBLIC_URL", "https://pub-eb6d088b2e4848c1b93664d6cb1123d1.r2.dev").rstrip("/")
 
         endpoint_url = f"https://{account_id}.r2.cloudflarestorage.com"
         s3 = boto3.client('s3', endpoint_url=endpoint_url, aws_access_key_id=access_key, aws_secret_access_key=secret_key, region_name='auto')
@@ -575,7 +576,9 @@ def upload_to_r2(file_path, safe_filename, task_id, progress_dict, result_dict):
             Config=TransferConfig(multipart_threshold=1024*25, max_concurrency=10, multipart_chunksize=1024*25, use_threads=True)
         )
 
-        final_url = f"https://{account_id}.r2.cloudflarestorage.com/{bucket_name}/{safe_filename}"
+        # توليد الرابط باستخدام الرابط العام (Public URL) وتشفير المسافات إن وجدت
+        from urllib.parse import quote
+        final_url = f"{public_url}/{quote(safe_filename)}"
         result_dict[site_name] = final_url
         progress_dict[site_name] = "✅ مكتمل"
     except Exception as e:

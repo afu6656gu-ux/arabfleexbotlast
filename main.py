@@ -11,7 +11,7 @@ import queue
 import shutil
 import urllib3
 import random
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, unquote, quote
 from requests_toolbelt import MultipartEncoder, MultipartEncoderMonitor
 
 try:
@@ -31,7 +31,7 @@ except ImportError:
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- رقم الإصدار ---
-VERSION = "14.6.1 (Fixed Cloudflare R2 Public Link)"
+VERSION = "14.7.0 (Added Qualities & R2 Public URL)"
 
 TOKEN = "8888154300:AAF8Ec1xJ27xKyjXDvxOG6kRFC0rQt8aKXY"
 ADMIN_CHAT_ID = 1013251619
@@ -51,7 +51,7 @@ DEFAULT_KEYS = {
     "CF_R2_SECRET_KEY": "a291f299669e419b8b5d85fa8cff421732fc3af32030b731260d844f6d5bc2a2",
     "CF_R2_ACCOUNT_ID": "a28ef4137231ef7aa6756d28c5450bcd",
     "CF_R2_BUCKET_NAME": "media-stream",
-    "CF_R2_PUBLIC_URL": "https://pub-eb6d088b2e4848c1b93664d6cb1123d1.r2.dev" # تم إضافة الرابط العام هنا
+    "CF_R2_PUBLIC_URL": "https://pub-eb6d088b2e4848c1b93664d6cb1123d1.r2.dev"
 }
 
 def load_config():
@@ -87,8 +87,6 @@ VIDMOLY_DOMAIN = "vidmoly.me"
 VIDARA_API_DOMAIN = "api.vidara.so"
 DOODSTREAM_DOMAIN = "doodapi.co" 
 ONECLOUD_DOMAIN = "1cloudfile.com"
-ONECLOUD_ACCOUNT_ID = "128144"
-GOFILE_ACCOUNT_ID = "b5184479-1587-46a6-b25d-8414ff17a4a2"
 
 bot = telebot.TeleBot(TOKEN)
 active_tasks = {}
@@ -110,9 +108,9 @@ def worker():
             if task.get('type') == 'upload_only':
                 upload_only_logic(task['chat_id'], task['msg_id'], task['task_id'])
             elif task.get('type') == 'merge':
-                merge_process_logic(task['links'], task['chat_id'], task['msg_id'], task['servers'], task.get('custom_name'))
+                merge_process_logic(task['links'], task['chat_id'], task['msg_id'], task['servers'], task.get('custom_name'), task.get('quality', 'best'))
             else:
-                process_logic(task['url'], task['chat_id'], task['msg_id'], task['servers'], task.get('custom_name'))
+                process_logic(task['url'], task['chat_id'], task['msg_id'], task['servers'], task.get('custom_name'), task.get('quality', 'best'))
         except Exception as e:
             print(f"Error in queue task: {e}")
         finally:
@@ -174,6 +172,12 @@ def get_emoji_for_server(s):
     if s == 'CloudflareR2': return '☁️'
     return '⚙️'
 
+def safe_edit(bot_instance, chat_id, message_id, text, reply_markup=None):
+    try:
+        bot_instance.edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=reply_markup, parse_mode="Markdown")
+    except Exception:
+        pass
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith('cancel_'))
 def cancel_task(call):
     task_id = call.data.replace('cancel_', '')
@@ -189,16 +193,9 @@ def cancel_task(call):
     else:
         bot.answer_callback_query(call.id, "⚠️ العملية انتهت أو لم تبدأ بعد.")
 
-def safe_edit(bot_instance, chat_id, message_id, text, reply_markup=None):
-    try:
-        bot_instance.edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=reply_markup, parse_mode="Markdown")
-    except Exception:
-        pass
-
 @bot.message_handler(commands=['start'])
 def start(message):
-    if message.chat.id != ADMIN_CHAT_ID:
-        return
+    if message.chat.id != ADMIN_CHAT_ID: return
     welcome_text = f"""🤖 *مرحباً بك في بوت Arab Fleex الاحترافي!*
 
 ⚡ البوت جاهز لسحب ورفع الفيديوهات (مفرد/باتش/دمج).
@@ -227,7 +224,7 @@ def manage_keys_cmd(message):
         InlineKeyboardButton("🔑 GoFile", callback_data="changekey_GOFILE_TOKEN"),
         InlineKeyboardButton("🔑 VK Token", callback_data="changekey_VK_ACCESS_TOKEN"),
         InlineKeyboardButton("🔑 Doodstream", callback_data="changekey_DOODSTREAM_API_KEY"),
-        InlineKeyboardButton("☁️ Cloudflare R2", callback_data="changekey_CF_R2_ACCESS_KEY") 
+        InlineKeyboardButton("☁️ Cloudflare R2", callback_data="changekey_CF_R2_ACCESS_KEY")
     ]
     markup.add(*buttons)
     bot.reply_to(message, "⚙️ *لوحة إدارة مفاتيح الـ API*\n\nاختر السيرفر الذي تريد تغيير مفتاحه. التغيير يطبق فوراً ويُحفظ دائماً:\n(بالنسبة لـ Cloudflare R2 ينصح بتعديل باقي البيانات يدوياً من السكربت لتعددها)", reply_markup=markup, parse_mode="Markdown")
@@ -271,7 +268,6 @@ def stats_cmd(message):
 @bot.message_handler(commands=['check'])
 def check_servers(message):
     if message.chat.id != ADMIN_CHAT_ID: return
-    
     msg = bot.reply_to(message, "🔍 *جاري فحص حالة اتصال السيرفرات والمفاتيح...*", parse_mode="Markdown")
     txt = f"📊 *تقرير حالة السيرفرات ({VERSION}):*\n\n"
     
@@ -285,21 +281,15 @@ def check_servers(message):
     ]
     
     headers = {'User-Agent': COMMON_USER_AGENT}
-    
     for name, dom, key, emj in servers_to_check:
         try:
             url_to_check = f"https://{dom}/api/upload/server?key={key}"
             if name == "Vidara": url_to_check = f"https://{dom}/"
-                
             r = requests.get(url_to_check, headers=headers, timeout=10, verify=False)
-            if r.status_code in [200, 301, 302, 403]: 
-                txt += f"{emj} *{name}:* متصل ✅\n"
-            else:
-                txt += f"{emj} *{name}:* 🔴 خطأ (كود: {r.status_code})\n"
-        except requests.exceptions.Timeout:
-             txt += f"{emj} *{name}:* 🔴 فشل (انتهى وقت الاتصال)\n"
-        except Exception as e:
-            txt += f"{emj} *{name}:* 🔴 فشل الاتصال\n"
+            if r.status_code in [200, 301, 302, 403]: txt += f"{emj} *{name}:* متصل ✅\n"
+            else: txt += f"{emj} *{name}:* 🔴 خطأ (كود: {r.status_code})\n"
+        except requests.exceptions.Timeout: txt += f"{emj} *{name}:* 🔴 فشل (انتهى وقت الاتصال)\n"
+        except Exception: txt += f"{emj} *{name}:* 🔴 فشل الاتصال\n"
 
     try:
         r = requests.get('https://api.gofile.io/servers', timeout=10)
@@ -324,10 +314,8 @@ def check_servers(message):
             s3 = boto3.client('s3', endpoint_url=f"https://{bot_config['CF_R2_ACCOUNT_ID']}.r2.cloudflarestorage.com", aws_access_key_id=bot_config['CF_R2_ACCESS_KEY'], aws_secret_access_key=bot_config['CF_R2_SECRET_KEY'], region_name='auto')
             s3.head_bucket(Bucket=bot_config['CF_R2_BUCKET_NAME'])
             txt += f"☁️ *Cloudflare R2:* متصل ✅\n"
-        except Exception as e:
-            txt += f"☁️ *Cloudflare R2:* 🔴 خطأ في الاتصال/البكت\n"
-    else:
-        txt += f"☁️ *Cloudflare R2:* 🔴 غير مدعوم (pip install boto3)\n"
+        except Exception: txt += f"☁️ *Cloudflare R2:* 🔴 خطأ في الاتصال/البكت\n"
+    else: txt += f"☁️ *Cloudflare R2:* 🔴 غير مدعوم (pip install boto3)\n"
 
     safe_edit(bot, message.chat.id, msg.message_id, txt)
 
@@ -342,28 +330,24 @@ def manage_queue_and_clean(message):
             return
         txt = f"🚦 *مهام الطابور الحالية ({len(q_list)}):*\n\n"
         for i, task in enumerate(q_list, 1):
-            if task.get('type') == 'merge':
-                txt += f"{i}. `دمج {len(task['links'])} مقاطع`\n"
-            else:
-                show_name = task.get('custom_name') or "مهمة سحب"
-                txt += f"{i}. `{show_name[:40]}`\n"
+            if task.get('type') == 'merge': txt += f"{i}. `دمج {len(task['links'])} مقاطع` - جودة {task.get('quality', 'best')}\n"
+            else: txt += f"{i}. `{str(task.get('custom_name') or 'مهمة')[:40]}` - جودة {task.get('quality', 'best')}\n"
         bot.reply_to(message, txt, parse_mode="Markdown")
     elif cmd == '/clearqueue':
         count = task_queue.qsize()
-        with task_queue.mutex:
-            task_queue.queue.clear()
+        with task_queue.mutex: task_queue.queue.clear()
         bot.reply_to(message, f"🗑️ *تم تفريغ الطابور!*\nتم حذف `{count}` مهمة بنجاح.", parse_mode="Markdown")
     elif cmd == '/clean':
         count = 0
         msg = bot.reply_to(message, "🧹 *جاري التنظيف...*", parse_mode="Markdown")
         for filename in os.listdir('.'):
             if filename.startswith(("video_", "out_", "err_", "merge_", "concat_")):
-                try:
-                    os.remove(filename)
-                    count += 1
-                except Exception:
-                    pass
+                try: os.remove(filename); count += 1
+                except: pass
         safe_edit(bot, message.chat.id, msg.message_id, f"✅ *تم التنظيف!*\nتم حذف `{count}` ملف مؤقت.")
+
+def bypass_player4me(url):
+    return url, "https://arabfleex.4meplayer.com/"
 
 def bypass_1cloudfile(url):
     headers = {'User-Agent': COMMON_USER_AGENT}
@@ -372,47 +356,39 @@ def bypass_1cloudfile(url):
     if match:
         hex_str = match.group(1)
         direct_link = "".join(chr(int(hex_str[i:i+2], 16) ^ 0x7A) for i in range(0, len(hex_str), 2))
-        if direct_link.startswith("http"):
-            return direct_link
+        if direct_link.startswith("http"): return direct_link
     raise Exception("❌ فشل سحب الرابط المباشر من 1cloudfile.")
 
 def bypass_uqload(url, bot_instance, chat_id, message_id, task_id):
     try:
-        if task_id and message_id:
-            safe_edit(bot_instance, chat_id, message_id, "🔍 *جاري فك حماية Uqload...*", reply_markup=get_cancel_keyboard(task_id))
+        if task_id and message_id: safe_edit(bot_instance, chat_id, message_id, "🔍 *جاري فك حماية Uqload...*", reply_markup=get_cancel_keyboard(task_id))
         headers = {'User-Agent': COMMON_USER_AGENT, 'Referer': f'https://{UQLOAD_DOMAIN}/'}
         r = requests.get(url, headers=headers, timeout=20, verify=False)
         packed = re.search(r"eval\(function\(p,a,c,k,e,d\)\{.*?\}\('(.*?)',(\d+),(\d+),'(.*?)'\.split\('\|'\)\)\)", r.text, re.DOTALL)
-        if not packed:
-            raise Exception("لم يتم العثور على مشغل الفيديو.")
+        if not packed: raise Exception("لم يتم العثور على مشغل الفيديو.")
         p, a, c, k = packed.group(1), int(packed.group(2)), int(packed.group(3)), packed.group(4).split('|')
         def replace(m):
             word = m.group(0)
             try:
                 n = int(word, a)
                 return k[n] if n < len(k) and k[n] else word
-            except Exception:
-                return word
+            except Exception: return word
         decoded = re.sub(r'\b\w+\b', replace, p)
         urls = re.findall(r'https?://[^\\"\' ]+\.m3u8[^\\"\' ]*', decoded)
-        if urls:
-            return urls[0], f'https://{UQLOAD_DOMAIN}/'
+        if urls: return urls[0], f'https://{UQLOAD_DOMAIN}/'
         raise Exception("لم يتم العثور على رابط الفيديو.")
-    except Exception as e:
-        raise Exception(f"❌ Uqload: {safe_error_text(e)}")
+    except Exception as e: raise Exception(f"❌ Uqload: {safe_error_text(e)}")
 
 def bypass_vidoba(url, bot_instance, chat_id, message_id, task_id):
     session = requests.Session()
     session.headers.update({'User-Agent': COMMON_USER_AGENT, 'Accept': 'text/html,*/*;q=0.8', 'Referer': 'https://vidoba.org/'})
     try:
-        if task_id and message_id:
-            safe_edit(bot_instance, chat_id, message_id, "🔍 *جاري فك حماية Vidoba...*", reply_markup=get_cancel_keyboard(task_id))
+        if task_id and message_id: safe_edit(bot_instance, chat_id, message_id, "🔍 *جاري فك حماية Vidoba...*", reply_markup=get_cancel_keyboard(task_id))
         r1 = session.get(url, timeout=15, verify=False)
         data1 = {}
         for name in ['op', 'id', 'mode', 'hash']:
             match = re.search(fr'name=["\']{name}["\']\s+value=["\']([^"\']*)["\']', r1.text)
-            if match:
-                data1[name] = match.group(1)
+            if match: data1[name] = match.group(1)
         if 'hash' not in data1:
             match_code = re.search(r'vidoba\.[a-z]+/(?:d/)?([a-zA-Z0-9_]+)', url)
             if match_code:
@@ -424,21 +400,24 @@ def bypass_vidoba(url, bot_instance, chat_id, message_id, task_id):
         time.sleep(1)
         r2 = session.post(r1.url, data=data1, timeout=20, verify=False)
         match_link = re.search(r'href=["\'](https?://[^"\']+cdnz[^"\']+)["\']', r2.text, re.IGNORECASE) or re.search(r'href=["\'](https?://[^"\']+\.(?:mp4|mkv)[^"\']*)["\'][^>]*download-btn', r2.text, re.IGNORECASE)
-        if match_link:
-            return match_link.group(1).replace('&amp;', '&')
+        if match_link: return match_link.group(1).replace('&amp;', '&')
         raise Exception("فشلت المحاولة.")
-    except Exception as e:
-        raise Exception(f"❌ Vidoba: {safe_error_text(e)}")
+    except Exception as e: raise Exception(f"❌ Vidoba: {safe_error_text(e)}")
 
-def download_manager(url, filename, bot_instance, chat_id, message_id, task_id, referer=None, origin=None, custom_msg="📥 *المرحلة 1: جاري التحميل...*"):
-    if task_id and message_id:
-        safe_edit(bot_instance, chat_id, message_id, custom_msg, reply_markup=get_cancel_keyboard(task_id))
+def get_format_string(quality):
+    if quality == '1080': return "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]/best"
+    if quality == '720': return "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]/best"
+    if quality == '480': return "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480]/best"
+    return "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+
+def download_manager(url, filename, bot_instance, chat_id, message_id, task_id, referer=None, origin=None, custom_msg="📥 *المرحلة 1: جاري التحميل...*", quality="best"):
+    if task_id and message_id: safe_edit(bot_instance, chat_id, message_id, custom_msg, reply_markup=get_cancel_keyboard(task_id))
     
     extra_headers = []
     if referer: extra_headers += ["--add-header", f"Referer:{referer}"]
     if origin: extra_headers += ["--add-header", f"Origin:{origin}"]
     
-    yt_dlp_format = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+    yt_dlp_format = get_format_string(quality)
     
     try:  
         cmd = ["python", "-m", "yt_dlp", "--no-playlist", "--geo-bypass", "-N", "8", "--newline", "--no-warnings", "--no-check-certificate", "-f", yt_dlp_format, "--remux-video", "mp4", "--hls-prefer-native", "-o", filename, "--user-agent", COMMON_USER_AGENT]
@@ -447,8 +426,7 @@ def download_manager(url, filename, bot_instance, chat_id, message_id, task_id, 
         cmd.append(url)
 
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
-        if task_id in active_tasks:
-            active_tasks[task_id]['process'] = process
+        if task_id in active_tasks: active_tasks[task_id]['process'] = process
             
         last_update = time.time()
         error_log = []
@@ -458,8 +436,7 @@ def download_manager(url, filename, bot_instance, chat_id, message_id, task_id, 
                 process.terminate()
                 raise Exception("🛑 تم إلغاء العملية.")
                 
-            if "ERROR:" in line or "Sign in" in line:
-                error_log.append(line.strip())
+            if "ERROR:" in line or "Sign in" in line: error_log.append(line.strip())
 
             if task_id and message_id and time.time() - last_update > 3 and "[download]" in line and "%" in line:
                 perc_m = re.search(r'([\d\.]+)\%', line)
@@ -485,8 +462,7 @@ def download_manager(url, filename, bot_instance, chat_id, message_id, task_id, 
         cmd.append(url)
 
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
-        if task_id in active_tasks:
-            active_tasks[task_id]['process'] = process
+        if task_id in active_tasks: active_tasks[task_id]['process'] = process
         last_update = time.time()
         for line in iter(process.stdout.readline, ''):
             if task_id in active_tasks and active_tasks.get(task_id, {}).get("cancel"):
@@ -532,8 +508,7 @@ def download_manager(url, filename, bot_instance, chat_id, message_id, task_id, 
                             safe_edit(bot_instance, chat_id, message_id, txt, reply_markup=get_cancel_keyboard(task_id))
                             last_update = now
             return
-    except Exception as e:
-        raise Exception(f"فشل التحميل: {safe_error_text(e)}")
+    except Exception as e: raise Exception(f"فشل التحميل: {safe_error_text(e)}")
 
 def upload_to_r2(file_path, safe_filename, task_id, progress_dict, result_dict):
     site_name = "CloudflareR2"
@@ -550,7 +525,6 @@ def upload_to_r2(file_path, safe_filename, task_id, progress_dict, result_dict):
         access_key = bot_config.get("CF_R2_ACCESS_KEY", "")
         secret_key = bot_config.get("CF_R2_SECRET_KEY", "")
         bucket_name = bot_config.get("CF_R2_BUCKET_NAME", "")
-        # جلب الرابط العام من الإعدادات
         public_url = bot_config.get("CF_R2_PUBLIC_URL", "https://pub-eb6d088b2e4848c1b93664d6cb1123d1.r2.dev").rstrip("/")
 
         endpoint_url = f"https://{account_id}.r2.cloudflarestorage.com"
@@ -576,8 +550,6 @@ def upload_to_r2(file_path, safe_filename, task_id, progress_dict, result_dict):
             Config=TransferConfig(multipart_threshold=1024*25, max_concurrency=10, multipart_chunksize=1024*25, use_threads=True)
         )
 
-        # توليد الرابط باستخدام الرابط العام (Public URL) وتشفير المسافات إن وجدت
-        from urllib.parse import quote
         final_url = f"{public_url}/{quote(safe_filename)}"
         result_dict[site_name] = final_url
         progress_dict[site_name] = "✅ مكتمل"
@@ -594,7 +566,6 @@ def upload_to_vk(file_path, safe_filename, custom_name, task_id, progress_dict, 
         api_url = "https://api.vk.com/method/video.save"
         params = {"access_token": bot_config["VK_ACCESS_TOKEN"], "v": "5.199", "name": custom_name or safe_filename, "wallpost": 0}
         res = requests.post(api_url, data=params, timeout=15).json()
-
         if "error" in res: raise Exception(f"خطأ في API: {res['error'].get('error_msg')}")
 
         upload_url = res["response"]["upload_url"]
@@ -603,7 +574,6 @@ def upload_to_vk(file_path, safe_filename, custom_name, task_id, progress_dict, 
         access_key = res["response"].get("access_key", "")
 
         progress_dict[site_name] = "📤 جاري الرفع..."
-        
         for attempt in range(3):
             try:
                 with open(file_path, 'rb') as fh:
@@ -625,8 +595,7 @@ def upload_to_vk(file_path, safe_filename, custom_name, task_id, progress_dict, 
             final_url = f"https://vk.com/video_ext.php?oid={owner_id}&id={video_id}&hash={access_key}" if access_key else f"https://vk.com/video{owner_id}_{video_id}"
             result_dict[site_name] = final_url
             progress_dict[site_name] = "✅ مكتمل"
-        else:
-            raise Exception("خطأ أثناء الرفع")
+        else: raise Exception("خطأ أثناء الرفع")
     except Exception as e:
         progress_dict[site_name] = "❌ فشل"
         result_dict[site_name] = f"ERROR:{safe_error_text(e)}"
@@ -640,7 +609,6 @@ def upload_to_xfs(domain, api_key, file_path, safe_filename, site_name, task_id,
             headers = {'User-Agent': COMMON_USER_AGENT, 'Accept': 'application/json'}
             srv_req = requests.get(f"https://{VIDARA_API_DOMAIN}/v1/upload/server?api_key={api_key}", headers=headers, timeout=20, verify=False)
             upload_url = srv_req.json().get('result', {}).get('upload_server')
-
             if not upload_url: raise Exception("فشل في جلب سيرفر الرفع")
 
             for attempt in range(3):
@@ -679,7 +647,6 @@ def upload_to_xfs(domain, api_key, file_path, safe_filename, site_name, task_id,
 
             if not upload_url: raise Exception("فشل جلب السيرفر")
             if upload_url.startswith('//'): upload_url = 'https:' + upload_url
-            
             upload_url += f"{'&' if '?' in upload_url else '?'}json=1&api_key={api_key}"
 
             for attempt in range(3):
@@ -701,12 +668,8 @@ def upload_to_xfs(domain, api_key, file_path, safe_filename, site_name, task_id,
             try:
                 data = up_req.json()
                 video_code = None
-                
-                if 'files' in data and isinstance(data['files'], list) and len(data['files']) > 0: 
-                    video_code = data['files'][0].get('filecode')
-                elif 'result' in data and isinstance(data['result'], list) and len(data['result']) > 0:
-                    video_code = data['result'][0].get('filecode')
-                    
+                if 'files' in data and isinstance(data['files'], list) and len(data['files']) > 0: video_code = data['files'][0].get('filecode')
+                elif 'result' in data and isinstance(data['result'], list) and len(data['result']) > 0: video_code = data['result'][0].get('filecode')
                 if not video_code:
                     match = re.search(r'"(?:file_code|filecode)"\s*:\s*"([a-zA-Z0-9]+)"', json.dumps(data), re.IGNORECASE)
                     if match: video_code = match.group(1)
@@ -729,7 +692,6 @@ def upload_to_gofile(file_path, safe_filename, task_id, progress_dict, result_di
         server = r.json()['data']['servers'][0]['name']
 
         progress_dict[site_name] = "📤 جاري الرفع..."
-        
         for attempt in range(3):
             try:
                 with open(file_path, 'rb') as fh:
@@ -752,8 +714,7 @@ def upload_to_gofile(file_path, safe_filename, task_id, progress_dict, result_di
         if data.get('status') == 'ok':
             result_dict[site_name] = data['data']['downloadPage']
             progress_dict[site_name] = "✅ مكتمل"
-        else:
-            raise Exception("خطأ في رفع GoFile")
+        else: raise Exception("خطأ في رفع GoFile")
     except Exception as e:
         progress_dict[site_name] = "❌ فشل"
         result_dict[site_name] = f"ERROR:{safe_error_text(e)}"
@@ -821,14 +782,14 @@ def process_batch_name_step(message, links):
     default_servers = ["Abstream", "Larhu", "Uqload", "Vidmoly", "Vidara", "GoFile", "VK", "Doodstream", "CloudflareR2"]
     msg_id = bot.send_message(message.chat.id, "⏳ جاري تجهيز القائمة...").message_id
     upload_selections[msg_id] = {'type': 'batch', 'links': links, 'name': base_name, 'servers': default_servers}
-    bot.edit_message_text(f"📦 *باتش ({len(links)} حلقة)*\n✅ الاسم: {base_name or 'تلقائي'}\n\n🎯 اختر السيرفرات:", chat_id=message.chat.id, message_id=msg_id, reply_markup=get_selection_keyboard(msg_id), parse_mode="Markdown")
+    show_quality_keyboard(message.chat.id, msg_id)
 
 def process_merge_name_step(message, links):
     custom_name = message.text.strip() if message.text and message.text.strip() != '/skip' else None
     default_servers = ["Abstream", "Larhu", "Uqload", "Vidmoly", "Vidara", "GoFile", "VK", "Doodstream", "CloudflareR2"]
     msg_id = bot.send_message(message.chat.id, "⏳ جاري تجهيز القائمة للدمج...").message_id
     upload_selections[msg_id] = {'type': 'merge', 'links': links, 'name': custom_name, 'servers': default_servers}
-    bot.edit_message_text(f"🧩 **عملية دمج ({len(links)} مقاطع)**\n✅ الاسم: `{custom_name or 'الافتراضي'}`\n\n🎯 اختر السيرفرات:", chat_id=message.chat.id, message_id=msg_id, reply_markup=get_selection_keyboard(msg_id), parse_mode="Markdown")
+    show_quality_keyboard(message.chat.id, msg_id)
 
 def process_name_step(message, url):
     if message.chat.id != ADMIN_CHAT_ID: return
@@ -836,16 +797,46 @@ def process_name_step(message, url):
     default_servers = ["Abstream", "Larhu", "Uqload", "Vidmoly", "Vidara", "GoFile", "VK", "Doodstream", "CloudflareR2"]
     msg_id = bot.send_message(message.chat.id, "⏳ جاري تجهيز القائمة...").message_id
     upload_selections[msg_id] = {'type': 'single', 'url': url, 'name': custom_name, 'servers': default_servers}
-    bot.edit_message_text(f"✅ الاسم: `{custom_name or 'الافتراضي'}`\n\n🎯 اختر السيرفرات:", chat_id=message.chat.id, message_id=msg_id, reply_markup=get_selection_keyboard(msg_id), parse_mode="Markdown")
+    show_quality_keyboard(message.chat.id, msg_id)
+
+def show_quality_keyboard(chat_id, msg_id):
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("🌟 أعلى جودة", callback_data=f"qual_best_{msg_id}"),
+        InlineKeyboardButton("📺 1080p", callback_data=f"qual_1080_{msg_id}"),
+        InlineKeyboardButton("📺 720p", callback_data=f"qual_720_{msg_id}"),
+        InlineKeyboardButton("📱 480p", callback_data=f"qual_480_{msg_id}")
+    )
+    markup.add(InlineKeyboardButton("🎬 تحميل كل الجودات (1080, 720, 480)", callback_data=f"qual_all_{msg_id}"))
+    markup.add(InlineKeyboardButton("🛑 إلغاء", callback_data=f"sel_cancel_{msg_id}"))
+    
+    data = upload_selections[msg_id]
+    bot.edit_message_text(f"✅ الاسم: `{data['name'] or 'الافتراضي'}`\n\n🎯 الرجاء اختيار جودة التحميل:", chat_id=chat_id, message_id=msg_id, reply_markup=markup, parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('qual_'))
+def handle_quality_selection(call):
+    parts = call.data.split('_')
+    quality = parts[1]
+    msg_id = int(parts[2])
+    if msg_id not in upload_selections:
+        bot.answer_callback_query(call.id, "⚠️ الجلسة انتهت.")
+        return
+    upload_selections[msg_id]['quality'] = quality
+    
+    data = upload_selections[msg_id]
+    q_label = "كل الجودات" if quality == "all" else ("أعلى جودة" if quality == "best" else f"{quality}p")
+    bot.edit_message_text(f"✅ الاسم: `{data['name'] or 'الافتراضي'}`\n⚙️ الجودة: `{q_label}`\n\n🎯 اختر السيرفرات:", chat_id=call.message.chat.id, message_id=msg_id, reply_markup=get_selection_keyboard(msg_id), parse_mode="Markdown")
 
 def get_selection_keyboard(msg_id):
     markup = InlineKeyboardMarkup(row_width=2)
     if msg_id not in upload_selections: return markup
     selected = upload_selections[msg_id]['servers']
     servers_list = [("🟢 ABStream", "Abstream"), ("🟠 Larhu", "Larhu"), ("🔵 Uqload", "Uqload"), ("🟣 Vidmoly", "Vidmoly"), ("🟡 Vidara", "Vidara"), ("🌐 GoFile", "GoFile"), ("📘 VK", "VK"), ("🟤 Playmogo", "Doodstream"), ("☁️ Cloudflare R2", "CloudflareR2")]
+    
+    # استخدام row_width=2 سيرتب الأزرار بشكل مثالي دون تكرار
     buttons = [InlineKeyboardButton(f"✅ {label}" if srv in selected else f"⬜ {label}", callback_data=f"sel_toggle_{srv}_{msg_id}") for label, srv in servers_list]
-    for i in range(0, len(buttons), 2): markup.add(*buttons[i:i+2])
-    if len(buttons) % 2 != 0: markup.add(buttons[-1])
+    markup.add(*buttons)
+    
     markup.add(InlineKeyboardButton("✅ تحديد الكل", callback_data=f"sel_all_{msg_id}"), InlineKeyboardButton("❌ مسح التحديد", callback_data=f"sel_none_{msg_id}"))
     markup.add(InlineKeyboardButton("🚀 بـدء الـرفـع الآن", callback_data=f"sel_start_{msg_id}"))
     markup.add(InlineKeyboardButton("🛑 إلغاء", callback_data=f"sel_cancel_{msg_id}"))
@@ -880,22 +871,38 @@ def handle_custom_selection(call):
         if not data['servers']:
             bot.answer_callback_query(call.id, "⚠️ اختر سيرفر واحد على الأقل!", show_alert=True)
             return
-        if data.get('type') == 'merge':
-            task_queue.put({'type': 'merge', 'links': data['links'], 'chat_id': call.message.chat.id, 'msg_id': msg_id, 'servers': data['servers'], 'custom_name': data['name']})
-        elif data.get('type') == 'batch':
-            pad = len(str(len(data['links'])))
-            for i, url in enumerate(data['links'], 1):
-                ep_num = str(i).zfill(pad)
-                ep_name = f"{data['name']} {ep_num}" if data['name'] else f"EP{ep_num}"
-                task_queue.put({'type': 'full', 'url': url, 'chat_id': call.message.chat.id, 'msg_id': None, 'servers': data['servers'], 'custom_name': ep_name})
-            bot.edit_message_text(f"✅ *تم إضافة {len(data['links'])} حلقة للطابور!*", chat_id=call.message.chat.id, message_id=msg_id, parse_mode="Markdown")
-            return
-        else:
-            task_queue.put({'type': 'full', 'url': data['url'], 'chat_id': call.message.chat.id, 'msg_id': msg_id, 'servers': data['servers'], 'custom_name': data['name']})
+        
+        quality_pref = data.get('quality', 'best')
+        qualities_to_process = ['1080', '720', '480'] if quality_pref == 'all' else [quality_pref]
+        total_tasks_added = 0
+
+        for idx, q in enumerate(qualities_to_process):
+            target_msg_id = msg_id if idx == 0 and data.get('type') != 'batch' else None
+            q_suffix = f" - {q}p" if q not in ['best', 'all'] else ""
+            
+            if data.get('type') == 'merge':
+                ep_name = f"{data['name']}{q_suffix}" if data['name'] else f"Merged{q_suffix}"
+                task_queue.put({'type': 'merge', 'links': data['links'], 'chat_id': call.message.chat.id, 'msg_id': target_msg_id, 'servers': data['servers'], 'custom_name': ep_name, 'quality': q})
+                total_tasks_added += 1
+            elif data.get('type') == 'batch':
+                pad = len(str(len(data['links'])))
+                for i, url in enumerate(data['links'], 1):
+                    ep_num = str(i).zfill(pad)
+                    ep_name = f"{data['name']} {ep_num}{q_suffix}" if data['name'] else f"EP{ep_num}{q_suffix}"
+                    task_queue.put({'type': 'full', 'url': url, 'chat_id': call.message.chat.id, 'msg_id': None, 'servers': data['servers'], 'custom_name': ep_name, 'quality': q})
+                    total_tasks_added += 1
+            else:
+                ep_name = f"{data['name']}{q_suffix}" if data['name'] else f"Video{q_suffix}"
+                task_queue.put({'type': 'full', 'url': data['url'], 'chat_id': call.message.chat.id, 'msg_id': target_msg_id, 'servers': data['servers'], 'custom_name': ep_name, 'quality': q})
+                total_tasks_added += 1
+        
+        if data.get('type') == 'batch' or quality_pref == 'all':
+            bot.edit_message_text(f"✅ *تم إضافة {total_tasks_added} مهمة للطابور!*", chat_id=call.message.chat.id, message_id=msg_id, parse_mode="Markdown")
         
         pos = task_queue.qsize()
         bot.answer_callback_query(call.id, f"✅ تمت الإضافة (ترتيبك: {pos})")
-        safe_edit(bot, call.message.chat.id, msg_id, "⏳ *جاري البدء...*" if pos == 1 else f"📝 *بالطابور: {pos}*")
+        if data.get('type') != 'batch' and quality_pref != 'all':
+            safe_edit(bot, call.message.chat.id, msg_id, "⏳ *جاري البدء...*" if pos == 1 else f"📝 *بالطابور: {pos}*")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('retryup_'))
 def handle_retry_upload(call):
@@ -919,14 +926,10 @@ def upload_only_logic(chat_id, message_id, task_id):
         args_map = {"Abstream": (ABSTREAM_DOMAIN, bot_config["ABSTREAM_API_KEY"]), "Larhu": (LARHU_DOMAIN, bot_config["LARHU_API_KEY"]), "Uqload": (UQLOAD_DOMAIN, bot_config["UQLOAD_API_KEY"]), "Vidmoly": (VIDMOLY_DOMAIN, bot_config["VIDMOLY_API_KEY"]), "Vidara": (VIDARA_API_DOMAIN, bot_config["VIDARA_API_KEY"]), "Doodstream": (DOODSTREAM_DOMAIN, bot_config["DOODSTREAM_API_KEY"])}
 
         for site in target_servers:
-            if site == "GoFile":
-                t = threading.Thread(target=upload_to_gofile, args=(out_file, safe_name, task_id, prog_dict, res_dict))
-            elif site == "VK":
-                t = threading.Thread(target=upload_to_vk, args=(out_file, safe_name, custom_name, task_id, prog_dict, res_dict))
-            elif site == "CloudflareR2":
-                t = threading.Thread(target=upload_to_r2, args=(out_file, safe_name, task_id, prog_dict, res_dict))
-            else:
-                t = threading.Thread(target=upload_to_xfs, args=(args_map[site][0], args_map[site][1], out_file, safe_name, site, task_id, prog_dict, res_dict))
+            if site == "GoFile": t = threading.Thread(target=upload_to_gofile, args=(out_file, safe_name, task_id, prog_dict, res_dict))
+            elif site == "VK": t = threading.Thread(target=upload_to_vk, args=(out_file, safe_name, custom_name, task_id, prog_dict, res_dict))
+            elif site == "CloudflareR2": t = threading.Thread(target=upload_to_r2, args=(out_file, safe_name, task_id, prog_dict, res_dict))
+            else: t = threading.Thread(target=upload_to_xfs, args=(args_map[site][0], args_map[site][1], out_file, safe_name, site, task_id, prog_dict, res_dict))
             threads.append(t); t.start(); time.sleep(3)
 
         last_upd = time.time()
@@ -977,7 +980,7 @@ def upload_only_logic(chat_id, message_id, task_id):
         safe_edit(bot, chat_id, message_id, f"❌ *توقفت إعادة الرفع:*\n`{safe_error_text(e)}`\n\n*تفاصيل الأخطاء:*\n" + "\n".join([f"{s}: {res_dict.get(s)}" for s in target_servers if str(res_dict.get(s)).startswith("ERROR:")]), reply_markup=markup)
     finally: active_tasks.pop(task_id, None)
 
-def process_logic(url, chat_id, message_id, target_servers, custom_name):
+def process_logic(url, chat_id, message_id, target_servers, custom_name, quality="best"):
     if not message_id: message_id = bot.send_message(chat_id, f"⏳ جاري بدء مهمة: `{custom_name}`...", parse_mode="Markdown").message_id
     task_id = f"{chat_id}_{message_id}_{int(time.time())}"
     active_tasks[task_id] = {"cancel": False, "process": None}
@@ -986,9 +989,9 @@ def process_logic(url, chat_id, message_id, target_servers, custom_name):
     try:
         ref, org = None, None
         if "4meplayer" in url or "player4me" in url:
-            safe_edit(bot, chat_id, message_id, "🔍 *جاري التخطي: Player4Me...*"); url, ref = bypass_player4me(url), "https://arabfleex.4meplayer.com/"
+            safe_edit(bot, chat_id, message_id, "🔍 *جاري التخطي: Player4Me...*"); url, ref = bypass_player4me(url)
         elif "vidoba" in url:
-            safe_edit(bot, chat_id, message_id, "🔍 *جاري التخطي: Vidoba...*"); url, ref = bypass_vidoba(url, bot, chat_id, message_id, task_id), "https://vidoba.org/"
+            safe_edit(bot, chat_id, message_id, "🔍 *جاري التخطي: Vidoba...*"); url, ref = bypass_vidoba(url, bot, chat_id, message_id, task_id)
         elif "1cloudfile" in url:
             safe_edit(bot, chat_id, message_id, "🔍 *جاري التخطي: 1cloudfile...*"); url = bypass_1cloudfile(url)
         elif "up4ever" in url or "/d/" in url:
@@ -998,7 +1001,7 @@ def process_logic(url, chat_id, message_id, target_servers, custom_name):
             safe_edit(bot, chat_id, message_id, "🔍 *جاري التخطي: Uqload...*"); url, ref = bypass_uqload(url, bot, chat_id, message_id, task_id)
 
         safe_name = f"{re.sub(r'[^\w\s\u0600-\u06FF-]', '', custom_name).strip()[:40] or 'Video'}.mp4" if custom_name else f"Vid_{random.randint(10000, 99999)}.mp4"
-        download_manager(url, out_file, bot, chat_id, message_id, task_id, referer=ref, origin=org, custom_msg=f"📥 *المرحلة 1: جاري تحميل [{custom_name or 'فيديو'}]...*")
+        download_manager(url, out_file, bot, chat_id, message_id, task_id, referer=ref, origin=org, custom_msg=f"📥 *المرحلة 1: جاري تحميل [{custom_name or 'فيديو'}]...*", quality=quality)
         
         if not os.path.exists(out_file) or os.path.getsize(out_file) < 500000: raise Exception("❌ الملف تالف أو فارغ.")
 
@@ -1006,14 +1009,10 @@ def process_logic(url, chat_id, message_id, target_servers, custom_name):
         args_map = {"Abstream": (ABSTREAM_DOMAIN, bot_config["ABSTREAM_API_KEY"]), "Larhu": (LARHU_DOMAIN, bot_config["LARHU_API_KEY"]), "Uqload": (UQLOAD_DOMAIN, bot_config["UQLOAD_API_KEY"]), "Vidmoly": (VIDMOLY_DOMAIN, bot_config["VIDMOLY_API_KEY"]), "Vidara": (VIDARA_API_DOMAIN, bot_config["VIDARA_API_KEY"]), "Doodstream": (DOODSTREAM_DOMAIN, bot_config["DOODSTREAM_API_KEY"])}
 
         for site in target_servers:
-            if site == "GoFile":
-                t = threading.Thread(target=upload_to_gofile, args=(out_file, safe_name, task_id, prog_dict, res_dict))
-            elif site == "VK":
-                t = threading.Thread(target=upload_to_vk, args=(out_file, safe_name, custom_name, task_id, prog_dict, res_dict))
-            elif site == "CloudflareR2":
-                t = threading.Thread(target=upload_to_r2, args=(out_file, safe_name, task_id, prog_dict, res_dict))
-            else:
-                t = threading.Thread(target=upload_to_xfs, args=(args_map[site][0], args_map[site][1], out_file, safe_name, site, task_id, prog_dict, res_dict))
+            if site == "GoFile": t = threading.Thread(target=upload_to_gofile, args=(out_file, safe_name, task_id, prog_dict, res_dict))
+            elif site == "VK": t = threading.Thread(target=upload_to_vk, args=(out_file, safe_name, custom_name, task_id, prog_dict, res_dict))
+            elif site == "CloudflareR2": t = threading.Thread(target=upload_to_r2, args=(out_file, safe_name, task_id, prog_dict, res_dict))
+            else: t = threading.Thread(target=upload_to_xfs, args=(args_map[site][0], args_map[site][1], out_file, safe_name, site, task_id, prog_dict, res_dict))
             threads.append(t); t.start(); time.sleep(3)
 
         last_upd = time.time()
@@ -1069,7 +1068,7 @@ def process_logic(url, chat_id, message_id, target_servers, custom_name):
         active_tasks.pop(task_id, None)
         if success and os.path.exists(out_file): os.remove(out_file)
 
-def merge_process_logic(links_list, chat_id, message_id, target_servers, custom_name):
+def merge_process_logic(links_list, chat_id, message_id, target_servers, custom_name, quality="best"):
     task_id = f"merge_{chat_id}_{message_id}"
     active_tasks[task_id] = {"cancel": False, "process": None}
     merged_out_file, concat_txt_file, downloaded_parts, success = f"out_{task_id}.mp4", f"concat_{task_id}.txt", [], False
@@ -1079,13 +1078,13 @@ def merge_process_logic(links_list, chat_id, message_id, target_servers, custom_
             if active_tasks[task_id].get("cancel"): raise Exception("🛑 تم إلغاء العملية.")
             part_filename = f"part_{task_id}_{i}.mp4"
             ref, org = None, None
-            if "4meplayer" in url or "player4me" in url: url, ref = bypass_player4me(url), "https://arabfleex.4meplayer.com/"
-            elif "vidoba" in url: url, ref = bypass_vidoba(url, bot, chat_id, message_id, task_id), "https://vidoba.org/"
+            if "4meplayer" in url or "player4me" in url: url, ref = bypass_player4me(url)
+            elif "vidoba" in url: url, ref = bypass_vidoba(url, bot, chat_id, message_id, task_id)
             elif "1cloudfile" in url: url = bypass_1cloudfile(url)
             elif "up4ever" in url or "/d/" in url: ref = "https://www.up-4ever.net/"
             elif "uqload" in url and (".mp4" in url or "/v/" in url or ".m3u8" in url): ref, org = f"https://{UQLOAD_DOMAIN}/", f"https://{UQLOAD_DOMAIN}"
             elif "uqload" in url: url, ref = bypass_uqload(url, bot, chat_id, message_id, task_id)
-            download_manager(url, part_filename, bot, chat_id, message_id, task_id, referer=ref, origin=org, custom_msg=f"📥 *تحميل المقطع ({i}/{len(links_list)})...*")
+            download_manager(url, part_filename, bot, chat_id, message_id, task_id, referer=ref, origin=org, custom_msg=f"📥 *تحميل المقطع ({i}/{len(links_list)})...*", quality=quality)
             if not os.path.exists(part_filename) or os.path.getsize(part_filename) < 500000: raise Exception(f"❌ المقطع رقم {i} تالف.")
             downloaded_parts.append(part_filename)
 
@@ -1112,14 +1111,10 @@ def merge_process_logic(links_list, chat_id, message_id, target_servers, custom_
         args_map = {"Abstream": (ABSTREAM_DOMAIN, bot_config["ABSTREAM_API_KEY"]), "Larhu": (LARHU_DOMAIN, bot_config["LARHU_API_KEY"]), "Uqload": (UQLOAD_DOMAIN, bot_config["UQLOAD_API_KEY"]), "Vidmoly": (VIDMOLY_DOMAIN, bot_config["VIDMOLY_API_KEY"]), "Vidara": (VIDARA_API_DOMAIN, bot_config["VIDARA_API_KEY"]), "Doodstream": (DOODSTREAM_DOMAIN, bot_config["DOODSTREAM_API_KEY"])}
 
         for site in target_servers:
-            if site == "GoFile":
-                t = threading.Thread(target=upload_to_gofile, args=(merged_out_file, safe_name, task_id, prog_dict, res_dict))
-            elif site == "VK":
-                t = threading.Thread(target=upload_to_vk, args=(merged_out_file, safe_name, custom_name, task_id, prog_dict, res_dict))
-            elif site == "CloudflareR2":
-                t = threading.Thread(target=upload_to_r2, args=(merged_out_file, safe_name, task_id, prog_dict, res_dict))
-            else:
-                t = threading.Thread(target=upload_to_xfs, args=(args_map[site][0], args_map[site][1], merged_out_file, safe_name, site, task_id, prog_dict, res_dict))
+            if site == "GoFile": t = threading.Thread(target=upload_to_gofile, args=(merged_out_file, safe_name, task_id, prog_dict, res_dict))
+            elif site == "VK": t = threading.Thread(target=upload_to_vk, args=(merged_out_file, safe_name, custom_name, task_id, prog_dict, res_dict))
+            elif site == "CloudflareR2": t = threading.Thread(target=upload_to_r2, args=(merged_out_file, safe_name, task_id, prog_dict, res_dict))
+            else: t = threading.Thread(target=upload_to_xfs, args=(args_map[site][0], args_map[site][1], merged_out_file, safe_name, site, task_id, prog_dict, res_dict))
             threads.append(t); t.start(); time.sleep(3)
 
         last_upd = time.time()
